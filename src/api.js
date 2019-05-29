@@ -19,37 +19,41 @@ module.exports = async (event, context, callback) => {
   }
 
   console.log(`Start ${backlog.project.projectKey}-${backlog.content.key_id}`)
-  if (backlog.notifications.length === 0) {
-    console.log('Notification not found.')
-    return callback(null, response(200, 'OK'))
-  }
 
-  const [slackUsers, backlogUsers] = await Promise.all([
-    fetchSlackUsers(),
-    fetchBacklogUsers(backlog.project.projectKey)
+  const [slackUsers] = await Promise.all([
+    fetchSlackUsers()
   ])
 
   const users = []
-  for (const notification of backlog.notifications) {
-    // find backlog user
-    const backlogUser = _.find(backlogUsers, { id: notification.user.id })
-    if (!backlogUser) {
-      continue
-    }
+
+  // assignee user
+  if (backlog.content.assignee) {
+    // find backlog mailAddress
+    const assigneeUser = await fetchBacklogUser(backlog.content.assignee.id)
     // find slack user by slack user's email
-    const slackUser = _.find(slackUsers.members, o => o.profile.email === backlogUser.mailAddress)
+    const slackAssigneeUser = _.find(slackUsers.members, o => o.profile.email === assigneeUser.mailAddress)
+    if (slackAssigneeUser) {
+      users.push(slackAssigneeUser)
+    }
+  }
+
+  for (const notification of backlog.notifications) {
+    // find backlog mailAddress
+    const user = await fetchBacklogUser(notification.user.id)
+
+    // find slack user by slack user's email
+    const slackUser = _.find(slackUsers.members, o => o.profile.email === user.mailAddress)
     if (!slackUser) {
       continue
     }
 
-    users.push(slackUser.name)
+    users.push(slackUser)
   }
 
   if (users.length === 0) {
     console.log('User not found.')
     return callback(null, response(200, 'OK'))
   }
-
   const issue = await fetchBacklogIssue(backlog.project.projectKey, backlog.content.key_id)
 
   console.log(`Start message post to ${users.join(',')}`)
@@ -77,16 +81,28 @@ const fetchBacklogIssue = (projectKey, issueKey) =>
   })
 
 /**
- * fetch backlog user list
- * @param projectKey
+ * fetch backlog user
+ * @param userId
  */
-const fetchBacklogUsers = projectKey =>
+const fetchBacklogUser = userId =>
   request({
-    uri: `${process.env.BACKLOG_BASE_URL}/api/v2/projects/${projectKey}/users`,
+    uri: `${process.env.BACKLOG_BASE_URL}/api/v2/users/${userId}`,
     qs: {
       apiKey: process.env.BACKLOG_API_KEY
     },
     json: true
+  })
+
+const fetchSlackChanelId = id =>
+  new Promise((resolve, reject) => {
+    slack.api('im.open', { user: id }, (err, response) => {
+      if (err) {
+        console.error(err)
+        reject(err)
+      } else {
+        resolve(response)
+      }
+    })
   })
 
 /**
@@ -146,7 +162,7 @@ const generateChatMessage = (backlogMessage, backlogIssue) => {
   }
 
   return {
-    as_user: true,
+    as_user: false,
     attachments: JSON.stringify([
       {
         fallback: `Backlog - ${backlogConst.types[backlogMessage.type]}: ${backlogKey} ${backlogMessage.content.summary}`,
@@ -166,11 +182,11 @@ const generateChatMessage = (backlogMessage, backlogIssue) => {
  * @param users
  * @returns {Promise.<*[]>}
  */
-const postChatMessage = (message, users) => {
+const postChatMessage = async (message, users) => {
   const promises = []
   for (const user of users) {
-    const payload = _.extend({}, message, { channel: `@${user}` })
-    console.log(payload)
+    const im = await fetchSlackChanelId(user.id)
+    const payload = _.extend({}, message, { channel: im.channel.id })
     promises.push(new Promise((resolve, reject) => {
       slack.api('chat.postMessage', payload, (err, response) => {
         if (err) {
